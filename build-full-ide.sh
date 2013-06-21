@@ -22,7 +22,7 @@
 : ${VERSION_TAG:=}                # Version suffix to be appended to the IDE version number. When building a signed IDE, make sure to provide a value for the VERSION_TAG
 
 : ${SCALA_VERSION:=}              # Scala version to use to build the IDE and all its dependencies
-: ${SCALA_IDE_GIT_REPO:=git://github.com/scala-ide/scala-ide.git} # Git repository to use to build Scala IDE 
+: ${SCALA_IDE_GIT_REPO:=git://github.com/scala-ide/scala-ide.git} # Git repository to use to build Scala IDE
 : ${SCALA_IDE_BRANCH:=}           # Scala IDE branch/tag to build
 : ${SCALARIFORM_GIT_REPO:=}       # Git repository to use to build scalariform
 : ${SCALARIFORM_BRANCH:=}         # Scalariform branch/tag to build
@@ -108,6 +108,7 @@ if [[ $DEBUG ]]
 then
     print_own_arguments "$@"
 fi
+
 ###############################################################
 #                       SCALA VERSION                         #
 ###############################################################
@@ -231,10 +232,8 @@ BASE_DIR=`pwd`
 KEYSTORE_PATH="${BASE_DIR}/${KEYSTORE_FOLDER}/typesafe.keystore"
 
 LOCAL_REPO=`pwd`/m2repo
-SOURCE=${BASE_DIR}/p2-repo
+SCALA_IDE_DEPENDENCIES_P2_REPO=${BASE_DIR}/scala-ide-dependencies-p2-repo
 PLUGINS=${SOURCE}/plugins
-REPO_NAME=scala-eclipse-toolchain-osgi-${REPO_SUFFIX}
-REPO=file://${SOURCE}/${REPO_NAME}
 NEXT_BASE=${BASE_DIR}/next/base
 
 # Expected locations where to find binaries of Scala IDE and Worksheet after each of the projects has been built
@@ -246,6 +245,21 @@ if $SIGN_BUILD
 then
     MAVEN_SIGN_ARGS=" -Djarsigner.storepass=${KEYSTORE_PASS} -Djarsigner.keypass=${KEYSTORE_PASS} -Djarsigner.keystore=/${KEYSTORE_PATH} "
 fi
+
+# Merge two P2 repositories
+#
+# $1 source directory
+# $2 dest directory
+function p2_merge()
+{
+    cd ${BASE_DIR}/$BUILD_TOOLS_DIR
+    cd maven-tool/merge-site # this folder contains the POM for merging update-sites
+
+    # Merge to update sites
+    ${MAVEN} ${MAVEN_EXTRA_ARGS} -Drepo.source=$1 -Drepo.dest=$2 package
+
+    cd ${BASE_DIR}
+}
 
 function build_sbinary()
 {
@@ -299,13 +313,16 @@ function build_toolchain()
     # build toolchain
     print_step "Building Toolchain"
 
+    # Make sure the local scala-ide dependencies folder is empty before starting the build
+    rm -rf ${SCALA_IDE_DEPENDENCIES_P2_REPO}
+    mkdir -p ${SCALA_IDE_DEPENDENCIES_P2_REPO}
+
     if [ -n "$SBT_VERSION" ]
     then
       EXTRA_OPTIONS="-Dsbt.version=${SBT_VERSION}"
     fi
 
     MAVEN_ARGS="-P ${scala_profile_ide} -Dmaven.repo.local=${LOCAL_REPO} -Drepo.typesafe=file://${LOCAL_REPO} ${MAVEN_EXTRA_ARGS} ${EXTRA_OPTIONS} clean install"
-    rm -rf ${SOURCE}/*
 
     cd ${SCALAIDE_DIR}
     ${MAVEN} -Dscala.version=${SCALA_VERSION} ${MAVEN_ARGS}
@@ -320,12 +337,9 @@ function build_toolchain()
     cd ../org.scala-ide.toolchain.update-site
     ${MAVEN} -Dscala.version=${SCALA_VERSION} ${MAVEN_ARGS}
 
-    REPO_NAME=scala-eclipse-toolchain-osgi-${REPO_SUFFIX}
-    REPO=file://${SOURCE}/${REPO_NAME}
-    rm -Rf ${SOURCE}/${REPO_NAME}
-    mkdir -p ${SOURCE}/${REPO_NAME}
-
-    cp -r org.scala-ide.scala.update-site/target/site/* ${SOURCE}/${REPO_NAME}
+    # merge toolchain in scala-ide p2 dependencies repo
+    CURRENT_DIR=`pwd`
+    p2_merge ${CURRENT_DIR}/org.scala-ide.scala.update-site/target/site/ ${SCALA_IDE_DEPENDENCIES_P2_REPO}
 
     cd ${BASE_DIR}
 }
@@ -337,18 +351,13 @@ function build_refactoring()
 
     cd ${SCALA_REFACTORING_DIR}
     GIT_HASH="`git log -1 --pretty=format:"%h"`"
-    ${MAVEN} ${MAVEN_EXTRA_ARGS} -P ${scala_profile_ide} -Dscala.version=${SCALA_VERSION} $REFACTORING_MAVEN_ARGS -Drepo.scala-ide=file://${SOURCE} -Dmaven.repo.local=${LOCAL_REPO} -Dgit.hash=${GIT_HASH} clean package
+    ${MAVEN} ${MAVEN_EXTRA_ARGS} -P ${scala_profile_ide} -Dscala.version=${SCALA_VERSION} $REFACTORING_MAVEN_ARGS -Drepo.scala-ide.toolchain=file://${SCALA_IDE_DEPENDENCIES_P2_REPO} -Dmaven.repo.local=${LOCAL_REPO} -Dgit.hash=${GIT_HASH} clean package
 
     cd $BASE_DIR
 
-    # make scala-refactoring repo
-
-    REPO_NAME=scala-refactoring-${REPO_SUFFIX}
-    REPO=file://${SOURCE}/${REPO_NAME}
-
-    rm -rf ${SOURCE}/${REPO_NAME}
-    mkdir -p ${SOURCE}/${REPO_NAME}
-    cp -r scala-refactoring/org.scala-refactoring.update-site/target/site/* ${SOURCE}/${REPO_NAME}
+    # merge scala-refactoring in scala-ide p2 dependencies repo
+    CURRENT_DIR=`pwd`
+    p2_merge ${CURRENT_DIR}/scala-refactoring/org.scala-refactoring.update-site/target/site/ ${SCALA_IDE_DEPENDENCIES_P2_REPO}
 
     cd ${BASE_DIR}
 }
@@ -361,11 +370,11 @@ function build_scalariform()
 
     GIT_HASH="`git log -1 --pretty=format:"%h"`"
 
-    ${MAVEN} ${MAVEN_EXTRA_ARGS} -P ${scala_profile_ide} -Dscala.version=${SCALA_VERSION} -Drepo.scala-ide=file://${SOURCE} -Dmaven.repo.local=${LOCAL_REPO} -Dgit.hash=${GIT_HASH} clean package
+    ${MAVEN} ${MAVEN_EXTRA_ARGS} -Dscala.version=${SCALA_VERSION} -Drepo.scala-ide.toolchain=file://${SCALA_IDE_DEPENDENCIES_P2_REPO} -Dmaven.repo.local=${LOCAL_REPO} -Dgit.hash=${GIT_HASH} clean package
 
-    rm -rf ${SOURCE}/scalariform-${REPO_SUFFIX}
-    mkdir ${SOURCE}/scalariform-${REPO_SUFFIX}
-    cp -r scalariform.update/target/site/* ${SOURCE}/scalariform-${REPO_SUFFIX}/
+    # merge scalariform in scala-ide p2 dependencies repo
+    CURRENT_DIR=`pwd`
+    p2_merge ${CURRENT_DIR}/scalariform.update/target/site/ ${SCALA_IDE_DEPENDENCIES_P2_REPO}
 
     cd ${BASE_DIR}
 }
@@ -386,7 +395,7 @@ function build_ide()
       EXTRA_OPTIONS="-Dsbt.version=${SBT_VERSION}"
     fi
 
-    ./build-all.sh -P ${scala_profile_ide} -Dscala.version=${SCALA_VERSION} -Drepo.scala-ide.root=file://${SOURCE} -Drepo.typesafe=file://${LOCAL_REPO} -Dmaven.repo.local=${LOCAL_REPO} -Dversion.tag=${VERSION_TAG} -Drepo.scala-refactoring=file://${SOURCE}/scala-refactoring-${REPO_SUFFIX} -Drepo.scalariform=file://${SOURCE}/scalariform-${REPO_SUFFIX} ${EXTRA_OPTIONS} clean install
+    ./build.sh -P ${scala_profile_ide} -Dscala.version=${SCALA_VERSION} -Drepo.scala-ide.root="" -Drepo.scala-ide.dependencies=file://${SCALA_IDE_DEPENDENCIES_P2_REPO} -Dmaven.repo.local=${LOCAL_REPO} -Dversion.tag=${VERSION_TAG} ${EXTRA_OPTIONS} clean install
 
     cd ${BASE_DIR}
 }
@@ -413,30 +422,6 @@ function build_worksheet_plugin()
 	${MAVEN} ${MAVEN_EXTRA_ARGS} -Dtycho.localArtifacts=ignore -P set-versions -P ${scala_profile_ide} -P ${worksheet_eclipse_profile} -Drepo.scala-ide=file://${SCALA_IDE_BINARIES} -Dscala.version=${SCALA_VERSION} -Dmaven.repo.local=${LOCAL_REPO} -Dtycho.style=maven --non-recursive exec:java
     # Then build the Worksheet plugin
 	${MAVEN} ${MAVEN_EXTRA_ARGS} -Dtycho.localArtifacts=ignore -P ${scala_profile_ide} -P ${worksheet_eclipse_profile} -Drepo.scala-ide=file://${SCALA_IDE_BINARIES} -Dscala.version=${SCALA_VERSION} -Dversion.tag=${WORKSHEET_VERSION_TAG} -Dmaven.repo.local=${LOCAL_REPO} ${MAVEN_SIGN_ARGS} clean package
-
-    cd ${BASE_DIR}
-}
-
-#
-# Merge two P2 repositories
-#
-# $1 source directory
-# $2 dest directory
-function p2_merge()
-{
-    #build-tools project is needed to merge p2 repos
-    BUILD_TOOLS_GIT_REPO=git://github.com/scala-ide/build-tools.git
-    BUILD_TOOLS=master
-    BUILD_TOOLS_DIR=build-tools
-
-    clone_git_repo_if_needed ${BUILD_TOOLS_GIT_REPO} ${BUILD_TOOLS_DIR}
-    checkout_git_repo ${BUILD_TOOLS_GIT_REPO} ${BUILD_TOOLS_DIR} ${BUILD_TOOLS}
-
-    cd $BUILD_TOOLS_DIR
-    cd maven-tool/merge-site # this folder contains the POM for merging update-sites
-
-    # Merge to update sites
-    ${MAVEN} ${MAVEN_EXTRA_ARGS} -Drepo.source=$1 -Drepo.dest=$2 package
 
     cd ${BASE_DIR}
 }
@@ -691,6 +676,15 @@ then
 
   esac
 fi
+
+
+#build-tools project is needed to merge p2 repos
+BUILD_TOOLS_GIT_REPO=git://github.com/scala-ide/build-tools.git
+BUILD_TOOLS=master
+BUILD_TOOLS_DIR=build-tools
+
+clone_git_repo_if_needed ${BUILD_TOOLS_GIT_REPO} ${BUILD_TOOLS_DIR}
+checkout_git_repo ${BUILD_TOOLS_GIT_REPO} ${BUILD_TOOLS_DIR} ${BUILD_TOOLS}
 
 clone_git_repo_if_needed ${SBINARY_GIT_REPO} ${SBINARY_DIR}
 clone_git_repo_if_needed ${SBT_GIT_REPO} ${SBT_DIR}
